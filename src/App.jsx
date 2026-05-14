@@ -1,4 +1,4 @@
-import React, { useMemo, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   ArrowRightLeft,
   Braces,
@@ -6,7 +6,11 @@ import {
   Download,
   Eraser,
   FunctionSquare,
+  Pause,
+  Play,
   Sparkles,
+  SkipBack,
+  SkipForward,
   Table2,
 } from 'lucide-react';
 import {
@@ -15,6 +19,7 @@ import {
   buildTruthTable,
   canMinimizeVariables,
   deriveExpressionFromTruthTable,
+  evaluateAst,
   minimizeTruthTable,
   parseLogicInput,
   toBooleanAlgebra,
@@ -25,6 +30,15 @@ const DEFAULT_INPUT = EXAMPLES[0].input;
 const DEFAULT_TABLE_VARIABLES = 'A, B, C';
 const DEFAULT_TABLE_OUTPUTS = [false, true, true, true, true, true, true, true];
 const SYMBOL_KEYS = ['A', 'B', 'C', 'X', 'Y', 'Z', '0', '1', '¬', '·', '+', '⊕', '→', '↔', '=', '(', ')'];
+const SIGNAL_STEP_MS = 360;
+const SIGNAL_SETTLE_MS = 900;
+const ROW_RESTART_MS = 500;
+const MIN_ROW_DURATION_MS = 1800;
+const GATE_INPUT_TOP_OFFSET = -16;
+const GATE_INPUT_BOTTOM_OFFSET = 16;
+const GATE_ARROW_CLEARANCE = 1;
+const WIRE_ARROW_LENGTH = 16;
+const WIRE_ARROW_HALF_HEIGHT = 8;
 
 function App() {
   const [source, setSource] = useState('expression');
@@ -32,6 +46,9 @@ function App() {
   const [input, setInput] = useState(DEFAULT_INPUT);
   const [variableText, setVariableText] = useState(DEFAULT_TABLE_VARIABLES);
   const [tableOutputs, setTableOutputs] = useState(DEFAULT_TABLE_OUTPUTS);
+  const [selectedRowIndex, setSelectedRowIndex] = useState(0);
+  const prefersReducedMotion = usePrefersReducedMotion();
+  const [isPlaying, setIsPlaying] = useState(() => !getPrefersReducedMotion());
   const inputRef = useRef(null);
 
   const parsed = useMemo(() => {
@@ -79,6 +96,43 @@ function App() {
     }
   }, [input, mode, source, tableOutputs, variableText]);
 
+  const rowCount = parsed.error ? 0 : parsed.table.rows.length;
+  const activeRowIndex = rowCount ? Math.min(selectedRowIndex, rowCount - 1) : 0;
+  const activeRow = parsed.error || !rowCount ? null : parsed.table.rows[activeRowIndex];
+  const maxSignalStage = useMemo(() => (
+    parsed.error ? 0 : getSignalMaxStage(parsed.ast)
+  ), [parsed.ast, parsed.error]);
+  const rowDuration = Math.max(
+    MIN_ROW_DURATION_MS,
+    (maxSignalStage + 1) * SIGNAL_STEP_MS + SIGNAL_SETTLE_MS + ROW_RESTART_MS,
+  );
+  const canStepRows = rowCount > 1;
+
+  useEffect(() => {
+    if (prefersReducedMotion) {
+      setIsPlaying(false);
+    }
+  }, [prefersReducedMotion]);
+
+  useEffect(() => {
+    if (parsed.error) {
+      setSelectedRowIndex(0);
+      return;
+    }
+
+    setSelectedRowIndex((currentIndex) => Math.min(currentIndex, Math.max(rowCount - 1, 0)));
+  }, [parsed.error, rowCount]);
+
+  useEffect(() => {
+    if (!isPlaying || prefersReducedMotion || parsed.error || !canStepRows) return undefined;
+
+    const timer = window.setTimeout(() => {
+      setSelectedRowIndex((currentIndex) => (currentIndex + 1) % rowCount);
+    }, rowDuration);
+
+    return () => window.clearTimeout(timer);
+  }, [activeRowIndex, canStepRows, isPlaying, parsed.error, prefersReducedMotion, rowCount, rowDuration]);
+
   const handleExample = (example) => {
     setMode(example.mode);
     setInput(example.input);
@@ -121,6 +175,28 @@ function App() {
       next[rowIndex] = !next[rowIndex];
       return next;
     });
+  };
+
+  const handleSelectRow = (rowIndex) => {
+    setSelectedRowIndex(rowIndex);
+    setIsPlaying(false);
+  };
+
+  const handlePreviousRow = () => {
+    if (!canStepRows) return;
+    setIsPlaying(false);
+    setSelectedRowIndex((currentIndex) => (currentIndex - 1 + rowCount) % rowCount);
+  };
+
+  const handleNextRow = () => {
+    if (!canStepRows) return;
+    setIsPlaying(false);
+    setSelectedRowIndex((currentIndex) => (currentIndex + 1) % rowCount);
+  };
+
+  const handleTogglePlayback = () => {
+    if (prefersReducedMotion || !canStepRows) return;
+    setIsPlaying((currentValue) => !currentValue);
   };
 
   const handleKeyboardInsert = (symbol) => {
@@ -301,7 +377,31 @@ function App() {
             </div>
             <Sparkles size={18} />
           </div>
-          {parsed.error ? <EmptyCanvas /> : <GateDiagram ast={parsed.ast} outputName={parsed.outputName} />}
+          {parsed.error ? null : (
+            <SignalPlaybackControls
+              row={activeRow}
+              rowIndex={activeRowIndex}
+              rowCount={rowCount}
+              outputName={parsed.outputName}
+              isPlaying={isPlaying && canStepRows && !prefersReducedMotion}
+              canStepRows={canStepRows}
+              prefersReducedMotion={prefersReducedMotion}
+              onTogglePlayback={handleTogglePlayback}
+              onPrevious={handlePreviousRow}
+              onNext={handleNextRow}
+            />
+          )}
+          {parsed.error ? (
+            <EmptyCanvas />
+          ) : (
+            <GateDiagram
+              ast={parsed.ast}
+              outputName={parsed.outputName}
+              assignment={activeRow?.assignment ?? {}}
+              rowIndex={activeRowIndex}
+              reducedMotion={prefersReducedMotion}
+            />
+          )}
         </section>
 
         <aside className="right-panel panel">
@@ -320,12 +420,36 @@ function App() {
               outputName={parsed.outputName}
               editable={source === 'truthTable'}
               onToggleResult={handleToggleTableResult}
+              selectedRowIndex={activeRowIndex}
+              onSelectRow={handleSelectRow}
             />
           )}
         </aside>
       </section>
     </main>
   );
+}
+
+function getPrefersReducedMotion() {
+  return typeof window !== 'undefined'
+    && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+}
+
+function usePrefersReducedMotion() {
+  const [prefersReducedMotion, setPrefersReducedMotion] = useState(getPrefersReducedMotion);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return undefined;
+
+    const mediaQuery = window.matchMedia('(prefers-reduced-motion: reduce)');
+    const handleChange = () => setPrefersReducedMotion(mediaQuery.matches);
+    handleChange();
+    mediaQuery.addEventListener('change', handleChange);
+
+    return () => mediaQuery.removeEventListener('change', handleChange);
+  }, []);
+
+  return prefersReducedMotion;
 }
 
 function parseVariableNames(value) {
@@ -402,7 +526,78 @@ function TruthTableEmpty() {
   );
 }
 
-function TruthTable({ table, outputName, editable = false, onToggleResult }) {
+function SignalPlaybackControls({
+  row,
+  rowIndex,
+  rowCount,
+  outputName,
+  isPlaying,
+  canStepRows,
+  prefersReducedMotion,
+  onTogglePlayback,
+  onPrevious,
+  onNext,
+}) {
+  if (!row) return null;
+
+  const assignmentLabel = formatAssignment(row.assignment);
+  const playLabel = isPlaying ? 'Pause signal playback' : 'Play signal playback';
+
+  return (
+    <div className="signal-controls" aria-label="Signal playback controls">
+      <div className="signal-buttons">
+        <button
+          type="button"
+          onClick={onPrevious}
+          disabled={!canStepRows}
+          title="Previous row"
+          aria-label="Previous truth-table row"
+        >
+          <SkipBack size={15} />
+        </button>
+        <button
+          type="button"
+          onClick={onTogglePlayback}
+          disabled={!canStepRows || prefersReducedMotion}
+          title={playLabel}
+          aria-label={playLabel}
+        >
+          {isPlaying ? <Pause size={15} /> : <Play size={15} />}
+        </button>
+        <button
+          type="button"
+          onClick={onNext}
+          disabled={!canStepRows}
+          title="Next row"
+          aria-label="Next truth-table row"
+        >
+          <SkipForward size={15} />
+        </button>
+      </div>
+      <div className="signal-status" aria-live="polite">
+        <span>Row {rowIndex + 1}/{rowCount}</span>
+        <code>{assignmentLabel || 'constant'}</code>
+        <strong className={row.result ? 'signal-true' : 'signal-false'}>
+          {outputName}={row.result ? '1' : '0'}
+        </strong>
+      </div>
+    </div>
+  );
+}
+
+function formatAssignment(assignment) {
+  return Object.entries(assignment)
+    .map(([name, value]) => `${name}=${value ? '1' : '0'}`)
+    .join(' ');
+}
+
+function TruthTable({ table, outputName, editable = false, onToggleResult, selectedRowIndex = 0, onSelectRow }) {
+  const handleRowKeyDown = (event, rowIndex) => {
+    if (event.key !== 'Enter' && event.key !== ' ') return;
+    event.preventDefault();
+    onSelectRow?.(rowIndex);
+  };
+
   return (
     <div className="truth-table-wrap">
       <table className="truth-table">
@@ -414,7 +609,17 @@ function TruthTable({ table, outputName, editable = false, onToggleResult }) {
         </thead>
         <tbody>
           {table.rows.map((row, index) => (
-            <tr key={index}>
+            <tr
+              key={index}
+              className={[
+                onSelectRow ? 'selectable-row' : '',
+                index === selectedRowIndex ? 'selected-row' : '',
+              ].filter(Boolean).join(' ')}
+              onClick={() => onSelectRow?.(index)}
+              onKeyDown={(event) => handleRowKeyDown(event, index)}
+              tabIndex={onSelectRow ? 0 : undefined}
+              aria-selected={index === selectedRowIndex}
+            >
               {table.variables.map((variable) => (
                 <td key={variable} className={row.assignment[variable] ? 'true' : 'false'}>
                   {row.assignment[variable] ? '1' : '0'}
@@ -442,22 +647,37 @@ function TruthTable({ table, outputName, editable = false, onToggleResult }) {
   );
 }
 
-function GateDiagram({ ast, outputName }) {
-  const layout = useMemo(() => layoutGateTree(ast, outputName), [ast, outputName]);
-  const { nodes, edges, width, height } = layout;
+function GateDiagram({ ast, outputName, assignment, rowIndex, reducedMotion }) {
+  const layout = useMemo(() => layoutGateTree(ast, outputName, assignment), [assignment, ast, outputName]);
+  const { nodes, edges, width, height, signalKey } = layout;
+  const animationKey = `${rowIndex}-${signalKey}`;
 
   return (
     <div className="gate-canvas">
       <svg viewBox={`0 0 ${width} ${height}`} role="img" aria-label="Logic gate diagram">
-        <defs>
-          <marker id="arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
-            <path d="M 0 0 L 8 4 L 0 8 z" fill="#64748b" />
-          </marker>
-        </defs>
         <g className="wires">
-          {edges.map((edge) => (
-            <path key={edge.id} d={edge.path} markerEnd="url(#arrow)" />
-          ))}
+          {edges.map((edge) => {
+            const signalClass = edge.value ? 'signal-true' : 'signal-false';
+
+            return (
+              <g
+                key={edge.id}
+                className={`wire ${signalClass}`}
+                style={{ '--signal-delay': `${edge.stage * SIGNAL_STEP_MS}ms` }}
+              >
+                <path className="wire-base" d={edge.stemPath} />
+                <polygon className="wire-arrow" points={edge.arrowPoints} />
+                {reducedMotion ? null : (
+                  <path
+                    key={`${animationKey}-${edge.id}`}
+                    className="wire-pulse"
+                    d={edge.stemPath}
+                    pathLength="1"
+                  />
+                )}
+              </g>
+            );
+          })}
         </g>
         {nodes.map((node) => <GateNode key={node.id} node={node} />)}
       </svg>
@@ -465,7 +685,7 @@ function GateDiagram({ ast, outputName }) {
   );
 }
 
-function layoutGateTree(ast, outputName = 'Result') {
+function layoutGateTree(ast, outputName = 'Result', assignment = {}) {
   let id = 0;
   let leafIndex = 0;
   const nodes = [];
@@ -479,10 +699,13 @@ function layoutGateTree(ast, outputName = 'Result') {
     const nodeId = `n${id++}`;
 
     if (node.type === 'var' || node.type === 'const') {
+      const value = evaluateAst(node, assignment);
       const placed = {
         id: nodeId,
         type: 'input',
         label: node.type === 'const' ? (node.value ? '1' : '0') : node.name,
+        value,
+        stage: 0,
         x: leftPad,
         y: topPad + leafIndex * rowGap,
       };
@@ -493,30 +716,49 @@ function layoutGateTree(ast, outputName = 'Result') {
 
     if (node.type === 'not') {
       const child = place(node.child, depth + 1);
+      const value = evaluateAst(node, assignment);
+      const stage = child.stage + 1;
       const placed = {
         id: nodeId,
         type: 'not',
         label: 'NOT',
+        value,
+        stage,
         x: child.x + colGap,
         y: child.y,
       };
       nodes.push(placed);
-      edges.push(makeEdge(child.outX, child.outY, placed.x, placed.y, `${child.id}-${placed.id}`));
+      edges.push(makeEdge(child.outX, child.outY, placed.x - GATE_ARROW_CLEARANCE, placed.y, `${child.id}-${placed.id}`, {
+        value: child.value,
+        stage: child.stage,
+      }));
       return { ...placed, outX: placed.x + 82, outY: placed.y };
     }
 
     const left = place(node.left, depth + 1);
     const right = place(node.right, depth + 1);
+    const value = evaluateAst(node, assignment);
+    const stage = Math.max(left.stage, right.stage) + 1;
     const placed = {
       id: nodeId,
       type: node.type,
       label: node.type.toUpperCase(),
+      value,
+      stage,
       x: Math.max(left.x, right.x) + colGap,
       y: (left.y + right.y) / 2,
     };
     nodes.push(placed);
-    edges.push(makeEdge(left.outX, left.outY, placed.x, placed.y - 16, `${left.id}-${placed.id}`));
-    edges.push(makeEdge(right.outX, right.outY, placed.x, placed.y + 16, `${right.id}-${placed.id}`));
+    const topInputX = getGateInputX(placed, GATE_INPUT_TOP_OFFSET);
+    const bottomInputX = getGateInputX(placed, GATE_INPUT_BOTTOM_OFFSET);
+    edges.push(makeEdge(left.outX, left.outY, topInputX, placed.y + GATE_INPUT_TOP_OFFSET, `${left.id}-${placed.id}`, {
+      value: left.value,
+      stage: left.stage,
+    }));
+    edges.push(makeEdge(right.outX, right.outY, bottomInputX, placed.y + GATE_INPUT_BOTTOM_OFFSET, `${right.id}-${placed.id}`, {
+      value: right.value,
+      stage: right.stage,
+    }));
     return { ...placed, outX: placed.x + getGateWidth(node.type), outY: placed.y };
   }
 
@@ -525,11 +767,16 @@ function layoutGateTree(ast, outputName = 'Result') {
     id: `n${id++}`,
     type: 'output',
     label: outputName,
+    value: root.value,
+    stage: root.stage + 1,
     x: root.outX + 54,
     y: root.outY,
   };
   nodes.push(output);
-  edges.push(makeEdge(root.outX, root.outY, output.x, output.y, `${root.id}-${output.id}`));
+  edges.push(makeEdge(root.outX, root.outY, output.x - GATE_ARROW_CLEARANCE, output.y, `${root.id}-${output.id}`, {
+    value: root.value,
+    stage: root.stage,
+  }));
 
   const maxX = Math.max(...nodes.map((node) => node.x)) + 140;
   const maxY = Math.max(...nodes.map((node) => node.y)) + 64;
@@ -539,42 +786,72 @@ function layoutGateTree(ast, outputName = 'Result') {
     edges,
     width: Math.max(560, maxX),
     height: Math.max(360, maxY),
+    signalKey: nodes.map((node) => `${node.id}:${Number(node.value)}:${node.stage}`).join('|'),
   };
 }
 
-function makeEdge(x1, y1, x2, y2, id) {
-  const mid = Math.max(32, (x2 - x1) / 2);
+function getSignalMaxStage(ast) {
+  if (ast.type === 'var' || ast.type === 'const') return 1;
+  if (ast.type === 'not') return getSignalMaxStage(ast.child) + 1;
+  return Math.max(getSignalMaxStage(ast.left), getSignalMaxStage(ast.right)) + 1;
+}
+
+function makeEdge(x1, y1, x2, y2, id, signal = {}) {
+  const direction = { x: 1, y: 0 };
+  const normal = { x: -direction.y, y: direction.x };
+  const base = {
+    x: x2 - (direction.x * WIRE_ARROW_LENGTH),
+    y: y2 - (direction.y * WIRE_ARROW_LENGTH),
+  };
+
   return {
     id,
-    path: `M ${x1} ${y1} C ${x1 + mid} ${y1}, ${x2 - mid} ${y2}, ${x2} ${y2}`,
+    stemPath: makeWirePath(x1, y1, base.x, base.y),
+    arrowPoints: [
+      `${x2},${y2}`,
+      `${base.x + (normal.x * WIRE_ARROW_HALF_HEIGHT)},${base.y + (normal.y * WIRE_ARROW_HALF_HEIGHT)}`,
+      `${base.x - (normal.x * WIRE_ARROW_HALF_HEIGHT)},${base.y - (normal.y * WIRE_ARROW_HALF_HEIGHT)}`,
+    ].join(' '),
+    value: Boolean(signal.value),
+    stage: signal.stage ?? 0,
   };
+}
+
+function makeWirePath(x1, y1, x2, y2) {
+  const mid = Math.max(32, (x2 - x1) / 2);
+  return `M ${x1} ${y1} C ${x1 + mid} ${y1}, ${x2 - mid} ${y2}, ${x2} ${y2}`;
 }
 
 function GateNode({ node }) {
+  const signalClass = node.value ? 'signal-true' : 'signal-false';
+
   if (node.type === 'input') {
     return (
-      <g className="gate-node input-node" transform={`translate(${node.x}, ${node.y})`}>
+      <g className={`gate-node input-node ${signalClass}`} transform={`translate(${node.x}, ${node.y})`}>
         <rect x="0" y="-20" width="78" height="40" rx="7" />
         <text x="39" y="5">{node.label}</text>
+        <SignalBadge value={node.value} x={66} y={-10} />
       </g>
     );
   }
 
   if (node.type === 'output') {
     return (
-      <g className="gate-node output-node" transform={`translate(${node.x}, ${node.y})`}>
+      <g className={`gate-node output-node ${signalClass}`} transform={`translate(${node.x}, ${node.y})`}>
         <rect x="0" y="-20" width="86" height="40" rx="7" />
         <text x="43" y="5">{node.label}</text>
+        <SignalBadge value={node.value} x={74} y={-10} />
       </g>
     );
   }
 
   if (node.type === 'not') {
     return (
-      <g className="gate-node gate-not" transform={`translate(${node.x}, ${node.y})`}>
+      <g className={`gate-node gate-not ${signalClass}`} transform={`translate(${node.x}, ${node.y})`}>
         <path d="M 0 -28 L 0 28 L 58 0 Z" />
         <circle cx="68" cy="0" r="7" />
         <text x="24" y="5">NOT</text>
+        <SignalBadge value={node.value} x={32} y={-13} />
       </g>
     );
   }
@@ -582,10 +859,20 @@ function GateNode({ node }) {
   const path = getGatePath(node.type);
 
   return (
-    <g className={`gate-node gate-${node.type}`} transform={`translate(${node.x}, ${node.y})`}>
+    <g className={`gate-node gate-${node.type} ${signalClass}`} transform={`translate(${node.x}, ${node.y})`}>
       {node.type === 'xor' ? <path className="xor-offset" d="M -12 -30 C 7 -14 7 14 -12 30" /> : null}
       <path d={path} />
       <text x={getGateWidth(node.type) / 2} y="5">{node.label}</text>
+      <SignalBadge value={node.value} x={getGateWidth(node.type) - 16} y={-18} />
+    </g>
+  );
+}
+
+function SignalBadge({ value, x, y }) {
+  return (
+    <g className={`signal-badge ${value ? 'signal-true' : 'signal-false'}`} transform={`translate(${x}, ${y})`}>
+      <circle cx="0" cy="0" r="8" />
+      <text x="0" y="3.5">{value ? '1' : '0'}</text>
     </g>
   );
 }
@@ -593,6 +880,52 @@ function GateNode({ node }) {
 function getGateWidth(type) {
   if (type === 'implies' || type === 'iff') return 116;
   return 96;
+}
+
+function getGateInputX(node, inputOffsetY) {
+  return node.x + getGateInputInset(node.type, inputOffsetY) - GATE_ARROW_CLEARANCE;
+}
+
+function getGateInputInset(type, inputOffsetY = 0) {
+  if (type === 'or' || type === 'xor') return getOrGateInputInset(inputOffsetY);
+  return 0;
+}
+
+function getOrGateInputInset(inputOffsetY) {
+  let low = 0;
+  let high = 1;
+
+  for (let index = 0; index < 16; index += 1) {
+    const mid = (low + high) / 2;
+    const point = getOrGateInputCurvePoint(mid);
+
+    if (point.y < inputOffsetY) {
+      low = mid;
+    } else {
+      high = mid;
+    }
+  }
+
+  return getOrGateInputCurvePoint((low + high) / 2).x;
+}
+
+function getOrGateInputCurvePoint(t) {
+  const oneMinusT = 1 - t;
+  const start = { x: 0, y: -34 };
+  const controlA = { x: 24, y: -26 };
+  const controlB = { x: 31, y: 26 };
+  const end = { x: 0, y: 34 };
+
+  return {
+    x: (oneMinusT ** 3 * start.x)
+      + (3 * oneMinusT ** 2 * t * controlA.x)
+      + (3 * oneMinusT * t ** 2 * controlB.x)
+      + (t ** 3 * end.x),
+    y: (oneMinusT ** 3 * start.y)
+      + (3 * oneMinusT ** 2 * t * controlA.y)
+      + (3 * oneMinusT * t ** 2 * controlB.y)
+      + (t ** 3 * end.y),
+  };
 }
 
 function getGatePath(type) {
