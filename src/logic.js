@@ -14,24 +14,24 @@ export const MAX_TRUTH_TABLE_VARIABLES = 6;
 
 export const EXAMPLES = [
   {
+    label: 'AND',
+    mode: 'statement',
+    input: 'A and B',
+  },
+  {
     label: 'Conditional',
     mode: 'statement',
-    input: 'if A and not B, then C',
+    input: 'if A then B',
   },
   {
-    label: 'Either-or',
-    mode: 'statement',
-    input: 'either A or B, and not C',
-  },
-  {
-    label: 'Algebra',
+    label: 'XOR',
     mode: 'boolean',
-    input: '(A · ¬B) → C',
+    input: 'A ⊕ B',
   },
   {
-    label: 'Equivalence',
+    label: 'NAND',
     mode: 'boolean',
-    input: '(A ↔ B) · (¬C + A)',
+    input: '¬(A · B)',
   },
 ];
 
